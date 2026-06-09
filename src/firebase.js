@@ -47,7 +47,7 @@ export const fbGetEmployees = async () => {
   try {
     const snap = await getDocs(collection(db, "companies", COMPANY_ID, "employees"));
     return snap.docs.map(d => ({ id: d.id, ...d.data() }));
-  } catch { return []; }
+  } catch(e) { console.error("fbGetEmployees error:", e); return []; }
 };
 export const fbSetEmployees = async (employees) => {
   try {
@@ -62,8 +62,13 @@ export const fbDeleteEmployee = async (empId) => {
   catch { return false; }
 };
 export const fbSaveEmployee = async (emp) => {
-  try { await setDoc(doc(db, "companies", COMPANY_ID, "employees", emp.id), emp); return true; }
-  catch { return false; }
+  try {
+    // Exclude photo from Firestore (too large for documents, keep in localStorage)
+    const { photo, ...empData } = emp;
+    await setDoc(doc(db, "companies", COMPANY_ID, "employees", emp.id), empData);
+    return true;
+  }
+  catch(e) { console.error("fbSaveEmployee error:", e); return false; }
 };
 
 // Records
@@ -79,7 +84,7 @@ export const fbSaveRecord = async (date, entries) => {
   try {
     await setDoc(doc(db, "companies", COMPANY_ID, "records", date), { entries });
     return true;
-  } catch { return false; }
+  } catch(e) { console.error("fbSaveRecord error:", e); return false; }
 };
 export const fbGetRecord = async (date) => {
   try {
