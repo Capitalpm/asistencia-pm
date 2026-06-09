@@ -155,19 +155,13 @@ export default function App() {
       let cfg  = await fbGetConfig()    || await getStore("config")    || DEFAULT_CFG;
       let emps = await fbGetEmployees();
       if(!emps.length) emps = await getStore("employees") || [];
-      // Always load records from Firestore first (source of truth)
-      // This ensures deleted records on any device are reflected everywhere
-      let recs = {};
-      if(navigator.onLine) {
-        recs = await fbGetRecords();
-        // Sync to localStorage
-        await setStore("records", recs);
-      } else {
-        recs = await getStore("records") || {};
-      }
+      let recs = await fbGetRecords();
+      if(!Object.keys(recs).length) recs = await getStore("records") || {};
       const pq = await getStore("pending_queue") || [];
       setCompany(co); setConfig(cfg); setEmps(emps); setRecs(recs); setPending(pq);
       if(navigator.onLine && pq.length>0) syncNow(pq, recs);
+      // Auto-close open shifts after loading
+      setTimeout(() => autoCloseShifts(recs), 2000);
       setScreen("landing");
     })();
   },[]);
@@ -226,6 +220,74 @@ export default function App() {
   const getTodayRec = (empId) => {
     const dk = todayKey();
     return (records[dk]||[]).find(r=>r.employeeId===empId) || null;
+  };
+
+  // ── Shift end times ──
+  const getShiftEnd = (puesto, turno) => {
+    // Returns end time in minutes since midnight
+    if(turno.includes("1")) return puesto.includes("Bodega") ? 14*60 : 13*60; // T1: 2pm or 1pm
+    return puesto.includes("Bodega") ? 22*60 : 21*60; // T2: 10pm or 9pm
+  };
+
+  const getShiftEndLabel = (puesto, turno) => {
+    if(turno.includes("1")) return puesto.includes("Bodega") ? "2:00 p.m." : "1:00 p.m.";
+    return puesto.includes("Bodega") ? "10:00 p.m." : "9:00 p.m.";
+  };
+
+  // ── Auto-close open shifts (1 hour after shift end) ──
+  const autoCloseShifts = useCallback(async (currentRecs) => {
+    const dk = todayKey();
+    const todayEntries = currentRecs[dk] || [];
+    const openEntries = todayEntries.filter(r => r.checkIn && !r.checkOut);
+    if(!openEntries.length) return;
+
+    // Get current time in minutes
+    const now = new Date();
+    const nowMins = now.getHours()*60 + now.getMinutes();
+
+    let updated = false;
+    const newRecs = {...currentRecs};
+    newRecs[dk] = [...todayEntries];
+
+    for(const entry of openEntries) {
+      const emp = employees.find(e=>e.id===entry.employeeId);
+      if(!emp) continue;
+      const shiftEndMins = getShiftEnd(entry.puesto, entry.turno);
+      const autoCloseMins = shiftEndMins + 60; // 1 hour after shift end
+      if(nowMins >= autoCloseMins) {
+        const idx = newRecs[dk].findIndex(r=>r.id===entry.id);
+        if(idx>=0) {
+          newRecs[dk][idx] = {...newRecs[dk][idx],
+            checkOut: getShiftEndLabel(entry.puesto, entry.turno),
+            checkOutAuto: true,
+            checkOutValid: true
+          };
+          updated = true;
+        }
+      }
+    }
+    if(updated) {
+      setRecs(newRecs);
+      await fbSaveRecord(dk, newRecs[dk]);
+      await setStore("records", newRecs);
+    }
+  }, [employees]);
+
+  // ── Admin manual close shift ──
+  const adminCloseShift = async (record) => {
+    const dk = record.date || todayKey();
+    const newRecs = {...records};
+    if(!newRecs[dk]) return;
+    const idx = newRecs[dk].findIndex(r=>r.id===record.id);
+    if(idx<0) return;
+    const closeTime = getShiftEndLabel(record.puesto, record.turno);
+    newRecs[dk][idx] = {...newRecs[dk][idx],
+      checkOut: closeTime,
+      checkOutAuto: true,
+      checkOutValid: true
+    };
+    await saveRecs(newRecs);
+    showToast(`✅ Salida registrada — ${record.employeeName}`);
   };
 
   // ── Clock in/out ──
@@ -533,12 +595,11 @@ export default function App() {
             </div>
             <GeoIndicator status={geoStatus} distance={geoDist} radius={config.fenceRadius}/>
             {!isDone && (
-              <div style={{display:"flex",flexDirection:"column",gap:10}}>
+              <div style={{display:"flex",gap:10}}>
                 {!geoStatus&&!isIn && <Btn full onClick={checkGeo} color={NAVY}>📡 Verificar ubicación</Btn>}
                 {!geoStatus&&isIn  && <Btn full onClick={checkGeo} color={NAVY}>📡 Verificar para salida</Btn>}
-                {geoStatus==="invalid" && <div style={{background:"#FEE2E2",borderRadius:10,padding:"10px 14px",color:"#DC2626",fontSize:13,fontWeight:600,textAlign:"center"}}>🚫 Debes estar dentro del área para registrar</div>}
-                {geoStatus==="valid"&&!isIn && <Btn full onClick={()=>clockAction("in")} disabled={loading} color={GREEN}>✅ Registrar Entrada</Btn>}
-                {geoStatus==="valid"&&isIn  && <Btn full onClick={()=>clockAction("out")} disabled={loading} color={RED}>🏁 Registrar Salida</Btn>}
+                {geoStatus&&geoStatus!=="checking"&&!isIn && <Btn full onClick={()=>clockAction("in")} disabled={loading} color={GREEN}>✅ Registrar Entrada</Btn>}
+                {geoStatus&&geoStatus!=="checking"&&isIn  && <Btn full onClick={()=>clockAction("out")} disabled={loading} color={RED}>🏁 Registrar Salida</Btn>}
               </div>
             )}
             {isDone && <div style={{background:"#DCFCE7",borderRadius:10,padding:"10px 14px",color:GREEN,fontWeight:700,fontSize:14,textAlign:"center"}}>✅ Jornada completada hoy</div>}
@@ -646,9 +707,21 @@ export default function App() {
                   <div>
                     <div style={{fontWeight:700,color:NAVY,fontSize:14}}>{r.employeeName}</div>
                     <div style={{fontSize:11,color:"#6B7280"}}>{r.puesto}</div>
-                    <div style={{fontSize:11,color:"#6B7280",marginTop:2}}>🟢 {r.checkIn}{r.checkOut&&` · 🔴 ${r.checkOut}`}{!r.checkInValid&&" · ⚠️ fuera de área"}</div>
+                    <div style={{fontSize:11,color:"#6B7280",marginTop:2}}>
+                      🟢 {r.checkIn}
+                      {r.checkOut && ` · 🔴 ${r.checkOut}`}
+                      {r.checkOutAuto && <span style={{color:YELLOW}}> · ⚠️ Auto</span>}
+                      {!r.checkInValid && <span style={{color:YELLOW}}> · ⚠️ geo inválida</span>}
+                    </div>
                   </div>
-                  <StatusBadge status={r.status}/>
+                  <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:6}}>
+                    <StatusBadge status={r.status}/>
+                    {r.checkIn && !r.checkOut && (
+                      <button onClick={()=>adminCloseShift(r)} style={{background:"#FEF3C7",border:"none",borderRadius:8,padding:"4px 10px",color:YELLOW,cursor:"pointer",fontSize:11,fontWeight:700}}>
+                        🏁 Cerrar turno
+                      </button>
+                    )}
+                  </div>
                 </div>
               </Card>
             ))}
@@ -916,27 +989,6 @@ export default function App() {
               <PinPad pin={pin} setPin={setPin} label="Nuevo PIN (4 dígitos)" onConfirm={async p=>{
                 const co={...company,adminPin:p}; setCompany(co); await setStore("company",co); await fbSetCompany(co); setPin(""); showToast("✅ PIN actualizado");
               }}/>
-            </Card>
-            <Card style={{marginTop:16,border:"2px solid #FEE2E2"}}>
-              <div style={{fontWeight:700,color:RED,marginBottom:6}}>🗑️ Borrar Registros de Asistencia</div>
-              <div style={{fontSize:12,color:"#6B7280",marginBottom:14}}>Elimina todos los registros de entrada/salida. Los empleados no se borran. Útil para limpiar datos de prueba.</div>
-              <div style={{display:"flex",gap:10}}>
-                <Btn small full color={RED} onClick={async()=>{
-                  if(!window.confirm("¿Seguro que deseas borrar TODOS los registros de asistencia? Esta acción no se puede deshacer.")) return;
-                  setRecs({});
-                  localStorage.removeItem("cpm_v1_records");
-                  localStorage.removeItem("cpm_v1_pending_queue");
-                  setPending([]);
-                  // Delete all records from Firestore
-                  try {
-                    const {getDocs, collection, deleteDoc, doc} = await import("firebase/firestore");
-                    const {db} = await import("./firebase.js");
-                    const snap = await getDocs(collection(db,"companies","capital-pm-001","records"));
-                    for(const d of snap.docs) await deleteDoc(doc(db,"companies","capital-pm-001","records",d.id));
-                  } catch(e){ console.error(e); }
-                  showToast("✅ Registros eliminados");
-                }}>🗑️ Borrar todos los registros</Btn>
-              </div>
             </Card>
           </div>
         )}
