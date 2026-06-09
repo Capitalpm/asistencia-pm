@@ -155,8 +155,16 @@ export default function App() {
       let cfg  = await fbGetConfig()    || await getStore("config")    || DEFAULT_CFG;
       let emps = await fbGetEmployees();
       if(!emps.length) emps = await getStore("employees") || [];
-      let recs = await fbGetRecords();
-      if(!Object.keys(recs).length) recs = await getStore("records") || {};
+      // Always load records from Firestore first (source of truth)
+      // This ensures deleted records on any device are reflected everywhere
+      let recs = {};
+      if(navigator.onLine) {
+        recs = await fbGetRecords();
+        // Sync to localStorage
+        await setStore("records", recs);
+      } else {
+        recs = await getStore("records") || {};
+      }
       const pq = await getStore("pending_queue") || [];
       setCompany(co); setConfig(cfg); setEmps(emps); setRecs(recs); setPending(pq);
       if(navigator.onLine && pq.length>0) syncNow(pq, recs);
@@ -917,6 +925,8 @@ export default function App() {
                   if(!window.confirm("¿Seguro que deseas borrar TODOS los registros de asistencia? Esta acción no se puede deshacer.")) return;
                   setRecs({});
                   localStorage.removeItem("cpm_v1_records");
+                  localStorage.removeItem("cpm_v1_pending_queue");
+                  setPending([]);
                   // Delete all records from Firestore
                   try {
                     const {getDocs, collection, deleteDoc, doc} = await import("firebase/firestore");
