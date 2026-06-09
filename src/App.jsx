@@ -990,6 +990,24 @@ export default function App() {
                 const co={...company,adminPin:p}; setCompany(co); await setStore("company",co); await fbSetCompany(co); setPin(""); showToast("✅ PIN actualizado");
               }}/>
             </Card>
+            <Card style={{marginTop:16,border:"2px solid #FEE2E2"}}>
+              <div style={{fontWeight:700,color:RED,marginBottom:6}}>🗑️ Borrar Registros de Asistencia</div>
+              <div style={{fontSize:12,color:"#6B7280",marginBottom:14}}>Elimina todos los registros de entrada/salida. Los empleados no se borran. Útil para limpiar datos de prueba.</div>
+              <Btn small full color={RED} onClick={async()=>{
+                if(!window.confirm("¿Seguro que deseas borrar TODOS los registros de asistencia? Esta acción no se puede deshacer.")) return;
+                setRecs({});
+                localStorage.removeItem("cpm_v1_records");
+                localStorage.removeItem("cpm_v1_pending_queue");
+                setPending([]);
+                try {
+                  const {getDocs, collection, deleteDoc, doc} = await import("firebase/firestore");
+                  const {db} = await import("./firebase.js");
+                  const snap = await getDocs(collection(db,"companies","capital-pm-001","records"));
+                  for(const d of snap.docs) await deleteDoc(doc(db,"companies","capital-pm-001","records",d.id));
+                } catch(e){ console.error(e); }
+                showToast("✅ Registros eliminados");
+              }}>🗑️ Borrar todos los registros</Btn>
+            </Card>
           </div>
         )}
 
