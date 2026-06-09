@@ -117,6 +117,9 @@ export default function App() {
   // admin add form
   const [form, setForm]       = useState({name:"",dui:"",pin:"",puesto:"Auxiliar de Conserjería de Cocina",turno:"Turno 1",phone:"",salary:"410.00"});
   const [reportDate, setRptDate] = useState(todayKey());
+  const [planillaFrom, setPlanFrom] = useState(todayKey().slice(0,8)+"01");
+  const [planillaTo,   setPlanTo]   = useState(todayKey());
+  const [reportTab, setReportTab]   = useState("asistencia"); // "asistencia" | "planilla"
 
   const showToast = (msg, type="ok") => { setToast({msg,type}); setTimeout(()=>setToast(null),3500); };
 
@@ -246,7 +249,110 @@ export default function App() {
     setGeoS(null);
   };
 
-  // ── Attendance report ──
+  // ── Payroll helpers ──
+  const parseMinutes = (t) => {
+    if(!t) return null;
+    const m = t.match(/(\d+):(\d+)\s*(a\.?\s*m\.?|p\.?\s*m\.?)/i);
+    if(!m) return null;
+    let h=parseInt(m[1]), min=parseInt(m[2]);
+    const pm = m[3].toLowerCase().includes("p");
+    if(pm && h!==12) h+=12;
+    if(!pm && h===12) h=0;
+    return h*60+min;
+  };
+  const calcHours = (checkIn, checkOut) => {
+    const i=parseMinutes(checkIn), o=parseMinutes(checkOut);
+    if(i===null||o===null) return 8;
+    let d=o-i; if(d<0) d+=1440;
+    return Math.round(d/60*100)/100;
+  };
+  const getDatesInRange = (from, to) => {
+    const dates=[]; let d=new Date(from+"T12:00:00");
+    const end=new Date(to+"T12:00:00");
+    while(d<=end){ dates.push(d.toISOString().slice(0,10)); d.setDate(d.getDate()+1); }
+    return dates;
+  };
+  const calcPayroll = (from, to) => {
+    const dates = getDatesInRange(from, to);
+    const periodDays = dates.length;
+    return employees.map(emp => {
+      const salaryMonthly = parseFloat(emp.salary)||0;
+      const dailyRate = salaryMonthly/30;
+      const hourlyRate = dailyRate/8;
+      let daysWorked=0, daysAbsent=0, daysLate=0, extraHours=0;
+      dates.forEach(date => {
+        const rec = (records[date]||[]).find(r=>r.employeeId===emp.id);
+        if(!rec){ daysAbsent++; return; }
+        if(rec.status==="P") daysWorked++;
+        else if(rec.status==="T"){ daysWorked++; daysLate++; }
+        else if(rec.status==="A"){ daysAbsent++; return; }
+        // Overtime: only if ≥ 2 extra hours
+        if(rec.checkIn && rec.checkOut){
+          const hrs = calcHours(rec.checkIn, rec.checkOut);
+          if(hrs>10) extraHours += (hrs-8); // count all extra if >=2h extra
+        }
+      });
+      const validExtra = extraHours>=2 ? extraHours : 0;
+      const baseSalary = dailyRate * daysWorked;
+      const overtimePay = validExtra * hourlyRate * 2;
+      const grossSalary = baseSalary + overtimePay;
+      const isssEmp = Math.round(grossSalary*0.03*100)/100;
+      const afpEmp  = Math.round(grossSalary*0.0725*100)/100;
+      const netSalary = Math.round((grossSalary-isssEmp-afpEmp)*100)/100;
+      return { emp, periodDays, daysWorked, daysAbsent, daysLate,
+        extraHours:Math.round(validExtra*100)/100,
+        baseSalary:Math.round(baseSalary*100)/100,
+        overtimePay:Math.round(overtimePay*100)/100,
+        grossSalary:Math.round(grossSalary*100)/100,
+        isssEmp, afpEmp, netSalary };
+    });
+  };
+
+  const exportPlanilla = (from, to) => {
+    const data = calcPayroll(from, to);
+    if(!data.length){ showToast("Sin empleados registrados","warn"); return; }
+    import("xlsx").then(({utils, writeFile}) => {
+      // Title rows
+      const rows = [
+        ["CAPITAL PM - Planilla de Salarios"],
+        [`Período: ${from} al ${to}`],
+        [],
+        ["No.","Nombre","DUI","Puesto","Turno","Salario Mensual",
+         "Días Período","Días Trabajados","Ausencias","Tardanzas",
+         "Horas Extra","Salario Base","H. Extra","Salario Bruto",
+         "ISSS (3%)","AFP (7.25%)","SALARIO LIQUIDO"]
+      ];
+      data.forEach((d,i)=>{
+        rows.push([
+          i+1, d.emp.name, d.emp.dui||"", d.emp.puesto, d.emp.turno,
+          parseFloat(d.emp.salary)||0,
+          d.periodDays, d.daysWorked, d.daysAbsent, d.daysLate,
+          d.extraHours, d.baseSalary, d.overtimePay, d.grossSalary,
+          d.isssEmp, d.afpEmp, d.netSalary
+        ]);
+      });
+      // Totals row
+      const tot = data.reduce((a,d)=>({
+        gross:a.gross+d.grossSalary, isss:a.isss+d.isssEmp,
+        afp:a.afp+d.afpEmp, net:a.net+d.netSalary
+      }),{gross:0,isss:0,afp:0,net:0});
+      rows.push([]);
+      rows.push(["","","","","","TOTALES","","","","","","","",
+        Math.round(tot.gross*100)/100,
+        Math.round(tot.isss*100)/100,
+        Math.round(tot.afp*100)/100,
+        Math.round(tot.net*100)/100]);
+
+      const ws = utils.aoa_to_sheet(rows);
+      ws["!cols"] = [5,28,14,28,10,14,10,12,10,10,10,14,10,14,10,12,16].map(w=>({wch:w}));
+      // Merge title
+      ws["!merges"] = [{s:{r:0,c:0},e:{r:0,c:16}},{s:{r:1,c:0},e:{r:1,c:16}}];
+      const wb = utils.book_new();
+      utils.book_append_sheet(wb, ws, "Planilla");
+      writeFile(wb, `Planilla_CapitalPM_${from}_${to}.xlsx`);
+      showToast("Planilla exportada");
+    });
+  };
   const getReport = (date) => (records[date]||[]);
 
   const exportCSV = (date) => {
@@ -569,31 +675,176 @@ export default function App() {
         {/* REPORTS */}
         {screen==="admin_report" && (
           <div style={{padding:"20px 16px"}}>
-            <div style={{fontSize:13,fontWeight:700,color:"#6B7280",letterSpacing:1,marginBottom:12}}>REPORTE DE ASISTENCIA</div>
-            <Card>
-              <div style={{fontSize:12,fontWeight:700,color:"#6B7280",marginBottom:6}}>FECHA</div>
-              <input type="date" value={reportDate} onChange={e=>setRptDate(e.target.value)}
-                style={{width:"100%",padding:"10px 12px",borderRadius:10,border:"2px solid #E5E7EB",fontSize:14,marginBottom:14,boxSizing:"border-box"}}/>
-              <div style={{display:"flex",gap:10}}>
-                <Btn small full onClick={()=>exportCSV(reportDate)}>⬇ Exportar CSV</Btn>
-              </div>
-            </Card>
-            {reportRecs.length===0 && <Card style={{textAlign:"center",color:"#9CA3AF",padding:24}}>Sin registros para {fmtDate(reportDate)}</Card>}
-            {reportRecs.map(r=>(
-              <Card key={r.id} style={{padding:"12px 16px"}}>
-                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
-                  <div>
-                    <div style={{fontWeight:700,color:NAVY,fontSize:14}}>{r.employeeName}</div>
-                    <div style={{fontSize:11,color:"#6B7280"}}>{r.puesto} · {r.turno}</div>
-                    <div style={{fontSize:11,color:"#6B7280",marginTop:2}}>
-                      {r.checkIn&&`🟢 ${r.checkIn}`}{r.checkOut&&` · 🔴 ${r.checkOut}`}
-                      {!r.checkInValid&&<span style={{color:YELLOW}}> · ⚠️ geo inválida</span>}
+            {/* Sub-tabs */}
+            <div style={{display:"flex",gap:8,marginBottom:16,background:"#F3F4F6",borderRadius:12,padding:4}}>
+              {[["asistencia","📋 Asistencia"],["planilla","💰 Planilla"]].map(([id,label])=>(
+                <button key={id} onClick={()=>setReportTab(id)} style={{flex:1,padding:"10px",borderRadius:9,border:"none",background:reportTab===id?"white":"transparent",color:reportTab===id?NAVY:"#6B7280",fontWeight:700,fontSize:13,cursor:"pointer",boxShadow:reportTab===id?"0 1px 4px rgba(0,0,0,0.1)":"none"}}>
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {/* ASISTENCIA tab */}
+            {reportTab==="asistencia" && (()=>{
+              const asistDates = getDatesInRange(planillaFrom, planillaTo);
+              const asistRecs = asistDates.flatMap(d=>(records[d]||[]).map(r=>({...r,date:d})));
+              // Group by employee
+              const byEmp = employees.map(emp=>{
+                const empRecs = asistDates.map(d=>{
+                  const r=(records[d]||[]).find(x=>x.employeeId===emp.id);
+                  return {date:d, rec:r||null};
+                });
+                const p=empRecs.filter(x=>x.rec&&x.rec.status==="P").length;
+                const t=empRecs.filter(x=>x.rec&&x.rec.status==="T").length;
+                const a=empRecs.filter(x=>!x.rec||x.rec.status==="A").length;
+                return {emp, empRecs, p, t, a};
+              });
+              return <>
+                <Card>
+                  <div style={{fontWeight:700,color:NAVY,marginBottom:14}}>📋 Reporte de Asistencia</div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
+                    <div>
+                      <div style={{fontSize:12,fontWeight:700,color:"#6B7280",marginBottom:5}}>DESDE</div>
+                      <input type="date" value={planillaFrom} onChange={e=>setPlanFrom(e.target.value)}
+                        style={{width:"100%",padding:"10px 12px",borderRadius:10,border:"2px solid #E5E7EB",fontSize:13,boxSizing:"border-box"}}/>
+                    </div>
+                    <div>
+                      <div style={{fontSize:12,fontWeight:700,color:"#6B7280",marginBottom:5}}>HASTA</div>
+                      <input type="date" value={planillaTo} onChange={e=>setPlanTo(e.target.value)}
+                        style={{width:"100%",padding:"10px 12px",borderRadius:10,border:"2px solid #E5E7EB",fontSize:13,boxSizing:"border-box"}}/>
                     </div>
                   </div>
-                  <div style={{textAlign:"right"}}><StatusBadge status={r.status}/><div style={{fontSize:11,color:"#6B7280",marginTop:4}}>${r.salary||""}</div></div>
+                  <div style={{background:LIGHT,borderRadius:10,padding:"8px 14px",marginBottom:14,fontSize:12,color:"#6B7280"}}>
+                    Período: <strong>{asistDates.length} días</strong> · {asistDates[0]} al {asistDates[asistDates.length-1]}
+                  </div>
+                  <Btn small full onClick={()=>{
+                    import("xlsx").then(({utils,writeFile})=>{
+                      const rows=[["Nombre","Puesto","Turno",...asistDates,"Presentes","Tardanzas","Ausencias"]];
+                      byEmp.forEach(({emp,empRecs,p,t,a})=>{
+                        rows.push([emp.name,emp.puesto,emp.turno,
+                          ...empRecs.map(x=>!x.rec||x.rec.status==="A"?"Ausente":x.rec.status==="T"?"Tardanza":"Presente"),
+                          p,t,a]);
+                      });
+                      const ws=utils.aoa_to_sheet(rows);
+                      ws["!cols"]=[28,28,10,...asistDates.map(()=>({wch:12})),10,10,10].map(w=>typeof w==="number"?{wch:w}:w);
+                      const wb=utils.book_new();
+                      utils.book_append_sheet(wb,ws,"Asistencia");
+                      writeFile(wb,`Asistencia_${planillaFrom}_${planillaTo}.xlsx`);
+                      showToast("Reporte exportado");
+                    });
+                  }}>⬇ Exportar Excel</Btn>
+                </Card>
+
+                {byEmp.length===0 && <Card style={{textAlign:"center",color:"#9CA3AF",padding:24}}>Sin empleados registrados</Card>}
+                {byEmp.map(({emp,empRecs,p,t,a})=>(
+                  <Card key={emp.id} style={{padding:"14px 16px"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                      <div>
+                        <div style={{fontWeight:700,color:NAVY,fontSize:14}}>{emp.name}</div>
+                        <div style={{fontSize:11,color:"#6B7280"}}>{emp.puesto} · {emp.turno}</div>
+                      </div>
+                      <div style={{display:"flex",gap:8}}>
+                        <span style={{background:"#DCFCE7",color:GREEN,borderRadius:8,padding:"3px 8px",fontSize:11,fontWeight:700}}>✅ {p}</span>
+                        <span style={{background:"#FEF3C7",color:YELLOW,borderRadius:8,padding:"3px 8px",fontSize:11,fontWeight:700}}>⚠️ {t}</span>
+                        <span style={{background:"#FEE2E2",color:RED,borderRadius:8,padding:"3px 8px",fontSize:11,fontWeight:700}}>❌ {a}</span>
+                      </div>
+                    </div>
+                    <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
+                      {empRecs.map(({date,rec})=>{
+                        const day=new Date(date+"T12:00").getDate();
+                        const st=!rec||rec.status==="A"?"A":rec.status;
+                        const colors={P:"#DCFCE7",T:"#FEF3C7",A:"#FEE2E2"};
+                        const tc={P:GREEN,T:YELLOW,A:RED};
+                        return(
+                          <div key={date} title={date} style={{width:28,height:28,borderRadius:6,background:colors[st]||"#F3F4F6",display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column"}}>
+                            <span style={{fontSize:9,color:tc[st]||"#9CA3AF",fontWeight:700,lineHeight:1}}>{day}</span>
+                            <span style={{fontSize:7,color:tc[st]||"#9CA3AF"}}>{st}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </Card>
+                ))}
+              </>;
+            })()}
+
+            {/* PLANILLA tab */}
+            {reportTab==="planilla" && <>
+              <Card>
+                <div style={{fontWeight:700,color:NAVY,marginBottom:14}}>💰 Planilla de Salarios</div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
+                  <div>
+                    <div style={{fontSize:12,fontWeight:700,color:"#6B7280",marginBottom:5}}>DESDE</div>
+                    <input type="date" value={planillaFrom} onChange={e=>setPlanFrom(e.target.value)}
+                      style={{width:"100%",padding:"10px 12px",borderRadius:10,border:"2px solid #E5E7EB",fontSize:13,boxSizing:"border-box"}}/>
+                  </div>
+                  <div>
+                    <div style={{fontSize:12,fontWeight:700,color:"#6B7280",marginBottom:5}}>HASTA</div>
+                    <input type="date" value={planillaTo} onChange={e=>setPlanTo(e.target.value)}
+                      style={{width:"100%",padding:"10px 12px",borderRadius:10,border:"2px solid #E5E7EB",fontSize:13,boxSizing:"border-box"}}/>
+                  </div>
                 </div>
+                <div style={{background:LIGHT,borderRadius:10,padding:"10px 14px",marginBottom:14,fontSize:12,color:"#6B7280"}}>
+                  Período: <strong>{getDatesInRange(planillaFrom,planillaTo).length} días</strong> · Descuentos: ISSS 3% + AFP 7.25% · Horas extra solo si ≥ 2h
+                </div>
+                <Btn full onClick={()=>exportPlanilla(planillaFrom,planillaTo)}>📥 Descargar Planilla Excel</Btn>
               </Card>
-            ))}
+
+              {/* Preview table */}
+              <div style={{fontSize:13,fontWeight:700,color:"#6B7280",letterSpacing:1,marginBottom:10}}>VISTA PREVIA</div>
+              {calcPayroll(planillaFrom,planillaTo).map(d=>(
+                <Card key={d.emp.id} style={{padding:"14px 16px"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+                    <div>
+                      <div style={{fontWeight:700,color:NAVY,fontSize:14}}>{d.emp.name}</div>
+                      <div style={{fontSize:11,color:"#6B7280"}}>{d.emp.puesto} · {d.emp.turno}</div>
+                    </div>
+                    <div style={{textAlign:"right"}}>
+                      <div style={{fontSize:18,fontWeight:900,color:GREEN}}>${d.netSalary.toFixed(2)}</div>
+                      <div style={{fontSize:10,color:"#9CA3AF"}}>líquido</div>
+                    </div>
+                  </div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
+                    {[
+                      [`${d.daysWorked}/${d.periodDays}`,"Días trab.","#16A34A"],
+                      [`${d.daysAbsent}`,"Ausencias","#DC2626"],
+                      [`${d.extraHours}h`,"H. Extra","#D97706"],
+                      [`$${d.grossSalary.toFixed(2)}`,"Bruto",NAVY],
+                      [`-$${d.isssEmp.toFixed(2)}`,"ISSS 3%","#DC2626"],
+                      [`-$${d.afpEmp.toFixed(2)}`,"AFP 7.25%","#7C3AED"],
+                    ].map(([val,lbl,col])=>(
+                      <div key={lbl} style={{background:"#F9FAFB",borderRadius:8,padding:"6px 8px",textAlign:"center"}}>
+                        <div style={{fontSize:13,fontWeight:700,color:col}}>{val}</div>
+                        <div style={{fontSize:10,color:"#9CA3AF"}}>{lbl}</div>
+                      </div>
+                    ))}
+                  </div>
+                </Card>
+              ))}
+              {/* Totals */}
+              {calcPayroll(planillaFrom,planillaTo).length>0 && (()=>{
+                const tots = calcPayroll(planillaFrom,planillaTo).reduce((a,d)=>({
+                  gross:a.gross+d.grossSalary, isss:a.isss+d.isssEmp,
+                  afp:a.afp+d.afpEmp, net:a.net+d.netSalary
+                }),{gross:0,isss:0,afp:0,net:0});
+                return (
+                  <Card style={{background:NAVY,padding:"16px"}}>
+                    <div style={{color:"rgba(255,255,255,0.6)",fontSize:12,fontWeight:700,marginBottom:8}}>TOTAL A PAGAR</div>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+                      {[[`$${tots.gross.toFixed(2)}`,"Bruto total","white"],
+                        [`-$${(tots.isss+tots.afp).toFixed(2)}`,"Descuentos","#FCA5A5"],
+                        [`$${tots.net.toFixed(2)}`,"TOTAL LÍQUIDO",ORANGE]
+                      ].map(([v,l,c])=>(
+                        <div key={l} style={{background:"rgba(255,255,255,0.08)",borderRadius:10,padding:"10px 12px",gridColumn:l==="TOTAL LÍQUIDO"?"1/-1":""}}>
+                          <div style={{fontSize:l==="TOTAL LÍQUIDO"?22:16,fontWeight:900,color:c}}>{v}</div>
+                          <div style={{fontSize:11,color:"rgba(255,255,255,0.5)"}}>{l}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </Card>
+                );
+              })()}
+            </>}
           </div>
         )}
 
