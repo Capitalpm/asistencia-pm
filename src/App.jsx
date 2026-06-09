@@ -23,7 +23,7 @@ const Logo = ({size=32}) => (
       <polygon points="1,26 26,51 26,26" fill="#8A97A6"/>
     </svg>
     <div>
-      <div style={{fontWeight:900,fontSize:size*0.65,color:NAVY,lineHeight:1}}>CAPITAL <span style={{color:ORANGE}}>PM</span></div>
+      <div style={{fontWeight:900,fontSize:size*0.65,color:"#C7CFD8",lineHeight:1}}>CAPITAL <span style={{color:ORANGE}}>PM</span></div>
       <div style={{fontSize:size*0.28,color:"#8A97A6",letterSpacing:1}}>GESTIÓN · SERVICIOS · SOLUCIONES</div>
     </div>
   </div>
