@@ -1,6 +1,11 @@
 import { useState, useEffect, useCallback } from "react";
+import { fbGetCompany, fbSetCompany, fbGetConfig, fbSetConfig,
+         fbGetEmployees, fbSaveEmployee, fbDeleteEmployee,
+         fbGetRecords, fbSaveRecord, fbGetRecord,
+         fbListenRecords, fbListenEmployees } from "./firebase.js";
 
 const NAVY="#16243F",ORANGE="#E2571E",GREEN="#16A34A",RED="#DC2626",YELLOW="#D97706",LIGHT="#F0F4F8";
+// localStorage kept as offline fallback only
 const SK = k => `cpm_v1_${k}`;
 const getStore = async k => { try { const v=localStorage.getItem(SK(k)); return v?JSON.parse(v):null; } catch{return null;} };
 const setStore = async (k,v) => { try{localStorage.setItem(SK(k),JSON.stringify(v));return true;}catch{return false;} };
@@ -145,13 +150,15 @@ export default function App() {
   // ── Load data ──
   useEffect(()=>{
     (async()=>{
-      const co   = await getStore("company")       || DEFAULT_CO;
-      const cfg  = await getStore("config")        || DEFAULT_CFG;
-      const emps = await getStore("employees")     || [];
-      const recs = await getStore("records")       || {};
-      const pq   = await getStore("pending_queue") || [];
+      // Try Firebase first, fall back to localStorage
+      let co   = await fbGetCompany()   || await getStore("company")   || DEFAULT_CO;
+      let cfg  = await fbGetConfig()    || await getStore("config")    || DEFAULT_CFG;
+      let emps = await fbGetEmployees();
+      if(!emps.length) emps = await getStore("employees") || [];
+      let recs = await fbGetRecords();
+      if(!Object.keys(recs).length) recs = await getStore("records") || {};
+      const pq = await getStore("pending_queue") || [];
       setCompany(co); setConfig(cfg); setEmps(emps); setRecs(recs); setPending(pq);
-      // auto-sync pending if online
       if(navigator.onLine && pq.length>0) syncNow(pq, recs);
       setScreen("landing");
     })();
@@ -171,9 +178,26 @@ export default function App() {
     return ()=>{ window.removeEventListener("online",goOnline); window.removeEventListener("offline",goOffline); };
   },[syncNow]);
 
-  const saveEmps = async (e) => { setEmps(e); await setStore("employees",e); };
-  const saveRecs = async (r) => { setRecs(r); await setStore("records",r); };
-  const saveCfg  = async (c) => { setConfig(c); await setStore("config",c); };
+  const saveEmps = async (e) => {
+    setEmps(e);
+    await setStore("employees", e); // local backup
+    for(const emp of e) await fbSaveEmployee(emp);
+  };
+  const saveRecs = async (r) => {
+    setRecs(r);
+    await setStore("records", r); // local backup
+    // Save each date to Firebase
+    for(const [date, entries] of Object.entries(r)) {
+      await fbSaveRecord(date, entries);
+    }
+  };
+  const saveCfg = async (c) => {
+    setConfig(c);
+    await setStore("config", c);
+    await fbSetConfig(c);
+  };
+
+  // ── Sync pending queue → main records ──
 
   // ── Geo check ──
   const checkGeo = useCallback(()=>{
@@ -501,11 +525,12 @@ export default function App() {
             </div>
             <GeoIndicator status={geoStatus} distance={geoDist} radius={config.fenceRadius}/>
             {!isDone && (
-              <div style={{display:"flex",gap:10}}>
+              <div style={{display:"flex",flexDirection:"column",gap:10}}>
                 {!geoStatus&&!isIn && <Btn full onClick={checkGeo} color={NAVY}>📡 Verificar ubicación</Btn>}
                 {!geoStatus&&isIn  && <Btn full onClick={checkGeo} color={NAVY}>📡 Verificar para salida</Btn>}
-                {geoStatus&&geoStatus!=="checking"&&!isIn && <Btn full onClick={()=>clockAction("in")} disabled={loading} color={GREEN}>✅ Registrar Entrada</Btn>}
-                {geoStatus&&geoStatus!=="checking"&&isIn  && <Btn full onClick={()=>clockAction("out")} disabled={loading} color={RED}>🏁 Registrar Salida</Btn>}
+                {geoStatus==="invalid" && <div style={{background:"#FEE2E2",borderRadius:10,padding:"10px 14px",color:"#DC2626",fontSize:13,fontWeight:600,textAlign:"center"}}>🚫 Debes estar dentro del área para registrar</div>}
+                {geoStatus==="valid"&&!isIn && <Btn full onClick={()=>clockAction("in")} disabled={loading} color={GREEN}>✅ Registrar Entrada</Btn>}
+                {geoStatus==="valid"&&isIn  && <Btn full onClick={()=>clockAction("out")} disabled={loading} color={RED}>🏁 Registrar Salida</Btn>}
               </div>
             )}
             {isDone && <div style={{background:"#DCFCE7",borderRadius:10,padding:"10px 14px",color:GREEN,fontWeight:700,fontSize:14,textAlign:"center"}}>✅ Jornada completada hoy</div>}
@@ -664,7 +689,13 @@ export default function App() {
                       setForm({name:e.name,dui:e.dui,pin:e.pin,puesto:e.puesto,turno:e.turno,phone:e.phone||"",salary:e.salary,isss:e.isss||"",afp:e.afp||"",afpName:e.afpName||"Crecer",photo:e.photo||""});
                       setScreen("admin_edit");
                     }} style={{background:"#EFF6FF",border:"none",borderRadius:8,padding:"6px 10px",color:"#1D4ED8",cursor:"pointer",fontSize:12,fontWeight:700}}>✏️ Editar</button>
-                    <button onClick={async()=>{ const ne=employees.filter(x=>x.id!==e.id); await saveEmps(ne); showToast("Empleado eliminado"); }} style={{background:"#FEE2E2",border:"none",borderRadius:8,padding:"6px 10px",color:RED,cursor:"pointer",fontSize:12,fontWeight:700}}>✕</button>
+                    <button onClick={async()=>{
+                      const ne=employees.filter(x=>x.id!==e.id);
+                      setEmps(ne);
+                      await setStore("employees", ne);
+                      await fbDeleteEmployee(e.id);
+                      showToast("Empleado eliminado");
+                    }} style={{background:"#FEE2E2",border:"none",borderRadius:8,padding:"6px 10px",color:RED,cursor:"pointer",fontSize:12,fontWeight:700}}>✕</button>
                   </div>
                 </div>
               </Card>
@@ -685,30 +716,88 @@ export default function App() {
             </div>
 
             {/* ASISTENCIA tab */}
-            {reportTab==="asistencia" && <>
-              <Card>
-                <div style={{fontSize:12,fontWeight:700,color:"#6B7280",marginBottom:6}}>FECHA</div>
-                <input type="date" value={reportDate} onChange={e=>setRptDate(e.target.value)}
-                  style={{width:"100%",padding:"10px 12px",borderRadius:10,border:"2px solid #E5E7EB",fontSize:14,marginBottom:14,boxSizing:"border-box"}}/>
-                <Btn small full onClick={()=>exportCSV(reportDate)}>⬇ Exportar Excel</Btn>
-              </Card>
-              {reportRecs.length===0 && <Card style={{textAlign:"center",color:"#9CA3AF",padding:24}}>Sin registros para {fmtDate(reportDate)}</Card>}
-              {reportRecs.map(r=>(
-                <Card key={r.id} style={{padding:"12px 16px"}}>
-                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+            {reportTab==="asistencia" && (()=>{
+              const asistDates = getDatesInRange(planillaFrom, planillaTo);
+              const asistRecs = asistDates.flatMap(d=>(records[d]||[]).map(r=>({...r,date:d})));
+              // Group by employee
+              const byEmp = employees.map(emp=>{
+                const empRecs = asistDates.map(d=>{
+                  const r=(records[d]||[]).find(x=>x.employeeId===emp.id);
+                  return {date:d, rec:r||null};
+                });
+                const p=empRecs.filter(x=>x.rec&&x.rec.status==="P").length;
+                const t=empRecs.filter(x=>x.rec&&x.rec.status==="T").length;
+                const a=empRecs.filter(x=>!x.rec||x.rec.status==="A").length;
+                return {emp, empRecs, p, t, a};
+              });
+              return <>
+                <Card>
+                  <div style={{fontWeight:700,color:NAVY,marginBottom:14}}>📋 Reporte de Asistencia</div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
                     <div>
-                      <div style={{fontWeight:700,color:NAVY,fontSize:14}}>{r.employeeName}</div>
-                      <div style={{fontSize:11,color:"#6B7280"}}>{r.puesto} · {r.turno}</div>
-                      <div style={{fontSize:11,color:"#6B7280",marginTop:2}}>
-                        {r.checkIn&&`🟢 ${r.checkIn}`}{r.checkOut&&` · 🔴 ${r.checkOut}`}
-                        {r.checkIn&&r.checkOut&&<span style={{color:NAVY,fontWeight:600}}> · {calcHours(r.checkIn,r.checkOut)}h</span>}
+                      <div style={{fontSize:12,fontWeight:700,color:"#6B7280",marginBottom:5}}>DESDE</div>
+                      <input type="date" value={planillaFrom} onChange={e=>setPlanFrom(e.target.value)}
+                        style={{width:"100%",padding:"10px 12px",borderRadius:10,border:"2px solid #E5E7EB",fontSize:13,boxSizing:"border-box"}}/>
+                    </div>
+                    <div>
+                      <div style={{fontSize:12,fontWeight:700,color:"#6B7280",marginBottom:5}}>HASTA</div>
+                      <input type="date" value={planillaTo} onChange={e=>setPlanTo(e.target.value)}
+                        style={{width:"100%",padding:"10px 12px",borderRadius:10,border:"2px solid #E5E7EB",fontSize:13,boxSizing:"border-box"}}/>
+                    </div>
+                  </div>
+                  <div style={{background:LIGHT,borderRadius:10,padding:"8px 14px",marginBottom:14,fontSize:12,color:"#6B7280"}}>
+                    Período: <strong>{asistDates.length} días</strong> · {asistDates[0]} al {asistDates[asistDates.length-1]}
+                  </div>
+                  <Btn small full onClick={()=>{
+                    import("xlsx").then(({utils,writeFile})=>{
+                      const rows=[["Nombre","Puesto","Turno",...asistDates,"Presentes","Tardanzas","Ausencias"]];
+                      byEmp.forEach(({emp,empRecs,p,t,a})=>{
+                        rows.push([emp.name,emp.puesto,emp.turno,
+                          ...empRecs.map(x=>!x.rec||x.rec.status==="A"?"Ausente":x.rec.status==="T"?"Tardanza":"Presente"),
+                          p,t,a]);
+                      });
+                      const ws=utils.aoa_to_sheet(rows);
+                      ws["!cols"]=[28,28,10,...asistDates.map(()=>({wch:12})),10,10,10].map(w=>typeof w==="number"?{wch:w}:w);
+                      const wb=utils.book_new();
+                      utils.book_append_sheet(wb,ws,"Asistencia");
+                      writeFile(wb,`Asistencia_${planillaFrom}_${planillaTo}.xlsx`);
+                      showToast("Reporte exportado");
+                    });
+                  }}>⬇ Exportar Excel</Btn>
+                </Card>
+
+                {byEmp.length===0 && <Card style={{textAlign:"center",color:"#9CA3AF",padding:24}}>Sin empleados registrados</Card>}
+                {byEmp.map(({emp,empRecs,p,t,a})=>(
+                  <Card key={emp.id} style={{padding:"14px 16px"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                      <div>
+                        <div style={{fontWeight:700,color:NAVY,fontSize:14}}>{emp.name}</div>
+                        <div style={{fontSize:11,color:"#6B7280"}}>{emp.puesto} · {emp.turno}</div>
+                      </div>
+                      <div style={{display:"flex",gap:8}}>
+                        <span style={{background:"#DCFCE7",color:GREEN,borderRadius:8,padding:"3px 8px",fontSize:11,fontWeight:700}}>✅ {p}</span>
+                        <span style={{background:"#FEF3C7",color:YELLOW,borderRadius:8,padding:"3px 8px",fontSize:11,fontWeight:700}}>⚠️ {t}</span>
+                        <span style={{background:"#FEE2E2",color:RED,borderRadius:8,padding:"3px 8px",fontSize:11,fontWeight:700}}>❌ {a}</span>
                       </div>
                     </div>
-                    <div style={{textAlign:"right"}}><StatusBadge status={r.status}/><div style={{fontSize:11,color:"#6B7280",marginTop:4}}>${r.salary||""}</div></div>
-                  </div>
-                </Card>
-              ))}
-            </>}
+                    <div style={{display:"flex",gap:4,flexWrap:"wrap"}}>
+                      {empRecs.map(({date,rec})=>{
+                        const day=new Date(date+"T12:00").getDate();
+                        const st=!rec||rec.status==="A"?"A":rec.status;
+                        const colors={P:"#DCFCE7",T:"#FEF3C7",A:"#FEE2E2"};
+                        const tc={P:GREEN,T:YELLOW,A:RED};
+                        return(
+                          <div key={date} title={date} style={{width:28,height:28,borderRadius:6,background:colors[st]||"#F3F4F6",display:"flex",alignItems:"center",justifyContent:"center",flexDirection:"column"}}>
+                            <span style={{fontSize:9,color:tc[st]||"#9CA3AF",fontWeight:700,lineHeight:1}}>{day}</span>
+                            <span style={{fontSize:7,color:tc[st]||"#9CA3AF"}}>{st}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </Card>
+                ))}
+              </>;
+            })()}
 
             {/* PLANILLA tab */}
             {reportTab==="planilla" && <>
@@ -817,7 +906,7 @@ export default function App() {
             <Card style={{marginTop:16}}>
               <div style={{fontWeight:700,color:NAVY,marginBottom:12}}>🔐 PIN de Administrador</div>
               <PinPad pin={pin} setPin={setPin} label="Nuevo PIN (4 dígitos)" onConfirm={async p=>{
-                const co={...company,adminPin:p}; setCompany(co); await setStore("company",co); setPin(""); showToast("✅ PIN actualizado");
+                const co={...company,adminPin:p}; setCompany(co); await setStore("company",co); await fbSetCompany(co); setPin(""); showToast("✅ PIN actualizado");
               }}/>
             </Card>
           </div>
