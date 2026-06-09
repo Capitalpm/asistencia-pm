@@ -10,8 +10,34 @@ const SK = k => `cpm_v1_${k}`;
 const getStore = async k => { try { const v=localStorage.getItem(SK(k)); return v?JSON.parse(v):null; } catch{return null;} };
 const setStore = async (k,v) => { try{localStorage.setItem(SK(k),JSON.stringify(v));return true;}catch{return false;} };
 const haversine = (a,b,c,d) => { const R=6371000,f1=a*Math.PI/180,f2=c*Math.PI/180,df=(c-a)*Math.PI/180,dl=(d-b)*Math.PI/180,x=Math.sin(df/2)**2+Math.cos(f1)*Math.cos(f2)*Math.sin(dl/2)**2; return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x)); };
-const nowTime = () => new Date().toLocaleTimeString("es-SV",{hour:"2-digit",minute:"2-digit"});
-const todayKey = () => new Date().toISOString().slice(0,10);
+
+// ── Server time (prevents device clock manipulation) ──
+let _serverDate = null;
+let _serverTime = null;
+const fetchServerTime = async () => {
+  const apis = [
+    "https://worldtimeapi.org/api/timezone/America/El_Salvador",
+    "https://timeapi.io/api/time/current/zone?timeZone=America/El_Salvador",
+  ];
+  for(const url of apis) {
+    try {
+      const r = await fetch(url, {cache:"no-store"});
+      const d = await r.json();
+      const raw = d.datetime || d.dateTime;
+      if(!raw) continue;
+      const dt = new Date(raw);
+      _serverDate = dt.toISOString().slice(0,10);
+      _serverTime = dt.toLocaleTimeString("es-SV",{hour:"2-digit",minute:"2-digit"});
+      return;
+    } catch { continue; }
+  }
+  // Fallback to device time
+  const dt = new Date();
+  _serverDate = dt.toISOString().slice(0,10);
+  _serverTime = dt.toLocaleTimeString("es-SV",{hour:"2-digit",minute:"2-digit"});
+};
+const nowTime = () => _serverTime || new Date().toLocaleTimeString("es-SV",{hour:"2-digit",minute:"2-digit"});
+const todayKey = () => _serverDate || new Date().toISOString().slice(0,10);
 const genId = () => Math.random().toString(36).slice(2,10);
 const fmtDate = d => new Date(d+"T12:00").toLocaleDateString("es-SV",{weekday:"short",day:"numeric",month:"short"});
 
@@ -150,18 +176,23 @@ export default function App() {
   // ── Load data ──
   useEffect(()=>{
     (async()=>{
-      // Try Firebase first, fall back to localStorage
+      // Fetch server time first to prevent clock manipulation
+      await fetchServerTime();
       let co   = await fbGetCompany()   || await getStore("company")   || DEFAULT_CO;
       let cfg  = await fbGetConfig()    || await getStore("config")    || DEFAULT_CFG;
       let emps = await fbGetEmployees();
       if(!emps.length) emps = await getStore("employees") || [];
-      let recs = await fbGetRecords();
-      if(!Object.keys(recs).length) recs = await getStore("records") || {};
+      // Always load records from Firestore (source of truth)
+      let recs = {};
+      if(navigator.onLine) {
+        recs = await fbGetRecords();
+        await setStore("records", recs);
+      } else {
+        recs = await getStore("records") || {};
+      }
       const pq = await getStore("pending_queue") || [];
       setCompany(co); setConfig(cfg); setEmps(emps); setRecs(recs); setPending(pq);
       if(navigator.onLine && pq.length>0) syncNow(pq, recs);
-      // Auto-close open shifts after loading
-      setTimeout(() => autoCloseShifts(recs), 2000);
       setScreen("landing");
     })();
   },[]);
@@ -222,78 +253,11 @@ export default function App() {
     return (records[dk]||[]).find(r=>r.employeeId===empId) || null;
   };
 
-  // ── Shift end times ──
-  const getShiftEnd = (puesto, turno) => {
-    // Returns end time in minutes since midnight
-    if(turno.includes("1")) return puesto.includes("Bodega") ? 14*60 : 13*60; // T1: 2pm or 1pm
-    return puesto.includes("Bodega") ? 22*60 : 21*60; // T2: 10pm or 9pm
-  };
-
-  const getShiftEndLabel = (puesto, turno) => {
-    if(turno.includes("1")) return puesto.includes("Bodega") ? "2:00 p.m." : "1:00 p.m.";
-    return puesto.includes("Bodega") ? "10:00 p.m." : "9:00 p.m.";
-  };
-
-  // ── Auto-close open shifts (1 hour after shift end) ──
-  const autoCloseShifts = useCallback(async (currentRecs) => {
-    const dk = todayKey();
-    const todayEntries = currentRecs[dk] || [];
-    const openEntries = todayEntries.filter(r => r.checkIn && !r.checkOut);
-    if(!openEntries.length) return;
-
-    // Get current time in minutes
-    const now = new Date();
-    const nowMins = now.getHours()*60 + now.getMinutes();
-
-    let updated = false;
-    const newRecs = {...currentRecs};
-    newRecs[dk] = [...todayEntries];
-
-    for(const entry of openEntries) {
-      const emp = employees.find(e=>e.id===entry.employeeId);
-      if(!emp) continue;
-      const shiftEndMins = getShiftEnd(entry.puesto, entry.turno);
-      const autoCloseMins = shiftEndMins + 60; // 1 hour after shift end
-      if(nowMins >= autoCloseMins) {
-        const idx = newRecs[dk].findIndex(r=>r.id===entry.id);
-        if(idx>=0) {
-          newRecs[dk][idx] = {...newRecs[dk][idx],
-            checkOut: getShiftEndLabel(entry.puesto, entry.turno),
-            checkOutAuto: true,
-            checkOutValid: true
-          };
-          updated = true;
-        }
-      }
-    }
-    if(updated) {
-      setRecs(newRecs);
-      await fbSaveRecord(dk, newRecs[dk]);
-      await setStore("records", newRecs);
-    }
-  }, [employees]);
-
-  // ── Admin manual close shift ──
-  const adminCloseShift = async (record) => {
-    const dk = record.date || todayKey();
-    const newRecs = {...records};
-    if(!newRecs[dk]) return;
-    const idx = newRecs[dk].findIndex(r=>r.id===record.id);
-    if(idx<0) return;
-    const closeTime = getShiftEndLabel(record.puesto, record.turno);
-    newRecs[dk][idx] = {...newRecs[dk][idx],
-      checkOut: closeTime,
-      checkOutAuto: true,
-      checkOutValid: true
-    };
-    await saveRecs(newRecs);
-    showToast(`✅ Salida registrada — ${record.employeeName}`);
-  };
-
   // ── Clock in/out ──
   const clockAction = async (action) => {
-    if(geoStatus!=="valid" && geoStatus!=="invalid") return;
+    if(geoStatus!=="valid") return;
     setLoading(true);
+    await fetchServerTime();
     const dk = todayKey();
     const time = nowTime();
     const now  = new Date();
@@ -598,8 +562,9 @@ export default function App() {
               <div style={{display:"flex",gap:10}}>
                 {!geoStatus&&!isIn && <Btn full onClick={checkGeo} color={NAVY}>📡 Verificar ubicación</Btn>}
                 {!geoStatus&&isIn  && <Btn full onClick={checkGeo} color={NAVY}>📡 Verificar para salida</Btn>}
-                {geoStatus&&geoStatus!=="checking"&&!isIn && <Btn full onClick={()=>clockAction("in")} disabled={loading} color={GREEN}>✅ Registrar Entrada</Btn>}
-                {geoStatus&&geoStatus!=="checking"&&isIn  && <Btn full onClick={()=>clockAction("out")} disabled={loading} color={RED}>🏁 Registrar Salida</Btn>}
+                {geoStatus==="invalid" && <div style={{background:"#FEE2E2",borderRadius:10,padding:"10px 14px",color:RED,fontSize:13,fontWeight:600,textAlign:"center"}}>🚫 Debes estar dentro del área para registrar</div>}
+                {geoStatus==="valid"&&!isIn && <Btn full onClick={()=>clockAction("in")} disabled={loading} color={GREEN}>✅ Registrar Entrada</Btn>}
+                {geoStatus==="valid"&&isIn  && <Btn full onClick={()=>clockAction("out")} disabled={loading} color={RED}>🏁 Registrar Salida</Btn>}
               </div>
             )}
             {isDone && <div style={{background:"#DCFCE7",borderRadius:10,padding:"10px 14px",color:GREEN,fontWeight:700,fontSize:14,textAlign:"center"}}>✅ Jornada completada hoy</div>}
@@ -645,14 +610,13 @@ export default function App() {
   // ── ADMIN SHELL ──
   if(["admin_dash","admin_emps","admin_cfg","admin_report"].includes(screen)) {
     const dk = todayKey();
-    // Deduplicate records by employeeId — keep the most complete record per employee
+    // Deduplicate by employeeId — keep most complete record
     const allTodayRecs = records[dk]||[];
     const recsByEmp = {};
     allTodayRecs.forEach(r => {
-      const existing = recsByEmp[r.employeeId];
-      if(!existing) { recsByEmp[r.employeeId] = r; return; }
-      // Prefer record with checkOut, or latest checkIn
-      if(r.checkOut && !existing.checkOut) recsByEmp[r.employeeId] = r;
+      const ex = recsByEmp[r.employeeId];
+      if(!ex) { recsByEmp[r.employeeId]=r; return; }
+      if(r.checkOut && !ex.checkOut) recsByEmp[r.employeeId]=r;
     });
     const todayRecs = Object.values(recsByEmp);
     const reportRecs = records[reportDate]||[];
@@ -660,6 +624,26 @@ export default function App() {
     const present = todayRecs.filter(r=>r.status==="P").length;
     const late    = todayRecs.filter(r=>r.status==="T").length;
     const absent  = Math.max(0, totalEmps - present - late);
+
+    // Shift end helpers
+    const getShiftEndLabel = (puesto, turno) => {
+      if(turno.includes("1")) return puesto.includes("Bodega") ? "2:00 p. m." : "1:00 p. m.";
+      return puesto.includes("Bodega") ? "10:00 p. m." : "9:00 p. m.";
+    };
+    const adminCloseShift = async (rec) => {
+      const date = rec.date || dk;
+      const newRecs = {...records};
+      if(!newRecs[date]) return;
+      const all = [...(newRecs[date]||[])];
+      const idx = all.findIndex(r=>r.id===rec.id);
+      if(idx<0) return;
+      all[idx] = {...all[idx], checkOut:getShiftEndLabel(rec.puesto,rec.turno), checkOutAuto:true, checkOutValid:true};
+      newRecs[date] = all;
+      setRecs(newRecs);
+      await fbSaveRecord(date, all);
+      await setStore("records", newRecs);
+      showToast(`✅ Turno cerrado — ${rec.employeeName}`);
+    };
 
     const TABS = [
       {id:"admin_dash",   icon:"📊", label:"Hoy"},
@@ -726,7 +710,7 @@ export default function App() {
                   <div style={{display:"flex",flexDirection:"column",alignItems:"flex-end",gap:6}}>
                     <StatusBadge status={r.status}/>
                     {r.checkIn && !r.checkOut && (
-                      <button onClick={()=>adminCloseShift(r)} style={{background:"#FEF3C7",border:"none",borderRadius:8,padding:"4px 10px",color:YELLOW,cursor:"pointer",fontSize:11,fontWeight:700}}>
+                      <button onClick={()=>adminCloseShift(r)} style={{background:"#FEF3C7",border:"none",borderRadius:8,padding:"4px 10px",color:"#92400E",cursor:"pointer",fontSize:11,fontWeight:700}}>
                         🏁 Cerrar turno
                       </button>
                     )}
@@ -1001,17 +985,15 @@ export default function App() {
             </Card>
             <Card style={{marginTop:16,border:"2px solid #FEE2E2"}}>
               <div style={{fontWeight:700,color:RED,marginBottom:6}}>🗑️ Borrar Registros de Asistencia</div>
-              <div style={{fontSize:12,color:"#6B7280",marginBottom:14}}>Elimina todos los registros de entrada/salida. Los empleados no se borran. Útil para limpiar datos de prueba.</div>
+              <div style={{fontSize:12,color:"#6B7280",marginBottom:14}}>Elimina todos los registros de entrada/salida. Los empleados no se borran.</div>
               <Btn small full color={RED} onClick={async()=>{
-                if(!window.confirm("¿Seguro que deseas borrar TODOS los registros de asistencia? Esta acción no se puede deshacer.")) return;
-                // Clear local FIRST to prevent re-upload
-                setRecs({});
-                setPending([]);
+                if(!window.confirm("¿Seguro que deseas borrar TODOS los registros? Esta acción no se puede deshacer.")) return;
+                setRecs({}); setPending([]);
                 localStorage.removeItem("cpm_v1_records");
                 localStorage.removeItem("cpm_v1_pending_queue");
                 showToast("🗑️ Borrando...");
                 try {
-                  const {getDocs, collection, deleteDoc, doc} = await import("firebase/firestore");
+                  const {getDocs,collection,deleteDoc,doc} = await import("firebase/firestore");
                   const {db} = await import("./firebase.js");
                   const snap = await getDocs(collection(db,"companies","capital-pm-001","records"));
                   for(const d of snap.docs) await deleteDoc(doc(db,"companies","capital-pm-001","records",d.id));
