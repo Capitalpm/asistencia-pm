@@ -645,12 +645,21 @@ export default function App() {
   // ── ADMIN SHELL ──
   if(["admin_dash","admin_emps","admin_cfg","admin_report"].includes(screen)) {
     const dk = todayKey();
-    const todayRecs = records[dk]||[];
+    // Deduplicate records by employeeId — keep the most complete record per employee
+    const allTodayRecs = records[dk]||[];
+    const recsByEmp = {};
+    allTodayRecs.forEach(r => {
+      const existing = recsByEmp[r.employeeId];
+      if(!existing) { recsByEmp[r.employeeId] = r; return; }
+      // Prefer record with checkOut, or latest checkIn
+      if(r.checkOut && !existing.checkOut) recsByEmp[r.employeeId] = r;
+    });
+    const todayRecs = Object.values(recsByEmp);
     const reportRecs = records[reportDate]||[];
     const totalEmps = employees.length;
     const present = todayRecs.filter(r=>r.status==="P").length;
     const late    = todayRecs.filter(r=>r.status==="T").length;
-    const absent  = totalEmps - present - late;
+    const absent  = Math.max(0, totalEmps - present - late);
 
     const TABS = [
       {id:"admin_dash",   icon:"📊", label:"Hoy"},
@@ -995,17 +1004,19 @@ export default function App() {
               <div style={{fontSize:12,color:"#6B7280",marginBottom:14}}>Elimina todos los registros de entrada/salida. Los empleados no se borran. Útil para limpiar datos de prueba.</div>
               <Btn small full color={RED} onClick={async()=>{
                 if(!window.confirm("¿Seguro que deseas borrar TODOS los registros de asistencia? Esta acción no se puede deshacer.")) return;
+                // Clear local FIRST to prevent re-upload
                 setRecs({});
+                setPending([]);
                 localStorage.removeItem("cpm_v1_records");
                 localStorage.removeItem("cpm_v1_pending_queue");
-                setPending([]);
+                showToast("🗑️ Borrando...");
                 try {
                   const {getDocs, collection, deleteDoc, doc} = await import("firebase/firestore");
                   const {db} = await import("./firebase.js");
                   const snap = await getDocs(collection(db,"companies","capital-pm-001","records"));
                   for(const d of snap.docs) await deleteDoc(doc(db,"companies","capital-pm-001","records",d.id));
-                } catch(e){ console.error(e); }
-                showToast("✅ Registros eliminados");
+                  showToast("✅ Registros eliminados");
+                } catch(e){ console.error(e); showToast("✅ Eliminados localmente"); }
               }}>🗑️ Borrar todos los registros</Btn>
             </Card>
           </div>
