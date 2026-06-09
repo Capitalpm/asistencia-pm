@@ -252,16 +252,27 @@ export default function App() {
   const exportCSV = (date) => {
     const rows = getReport(date);
     if(!rows.length){ showToast("Sin registros para esta fecha","warn"); return; }
-    const header = ["Nombre","DUI","Puesto","Turno","Salario","ISSS","AFP","Institución AFP","Entrada","Salida","Estado","Geo Entrada","Geo Salida"];
-    const lines = rows.map(r=>{
-      const emp = employees.find(e=>e.id===r.employeeId)||{};
-      return [r.employeeName,emp.dui||"",r.puesto,r.turno,r.salary||"",emp.isss||"",emp.afp||"",emp.afpName||"",r.checkIn||"",r.checkOut||"",r.status,r.checkInValid?"✓":"✗",r.checkOutValid?"✓":"✗"].join(",");
+    import("xlsx").then(({utils, writeFile}) => {
+      const data = [
+        ["Nombre","DUI","Puesto","Turno","Salario","ISSS","AFP","Institucion AFP","Entrada","Salida","Estado","Geo Entrada","Geo Salida"]
+      ];
+      rows.forEach(r=>{
+        const emp = employees.find(e=>e.id===r.employeeId)||{};
+        data.push([
+          r.employeeName, emp.dui||"", r.puesto, r.turno, r.salary||"",
+          emp.isss||"", emp.afp||"", emp.afpName||"",
+          r.checkIn||"", r.checkOut||"",
+          r.status==="P"?"Presente":r.status==="A"?"Ausente":r.status==="T"?"Tardanza":"",
+          r.checkInValid?"Si":"No", r.checkOutValid?"Si":"No"
+        ]);
+      });
+      const ws = utils.aoa_to_sheet(data);
+      ws["!cols"] = [30,16,30,12,10,14,14,14,12,12,12,12,12].map(w=>({wch:w}));
+      const wb = utils.book_new();
+      utils.book_append_sheet(wb, ws, "Asistencia");
+      writeFile(wb, `Asistencia_CapitalPM_${date}.xlsx`);
+      showToast("Excel exportado correctamente");
     });
-    const csv = [header.join(","),...lines].join("\n");
-    const blob = new Blob([csv],{type:"text/csv"});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href=url; a.download=`asistencia_${date}.csv`; a.click();
-    showToast("✅ CSV exportado");
   };
 
   // ══════════════════════════════════════════════════════════════════════
