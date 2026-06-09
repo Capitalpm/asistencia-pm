@@ -252,31 +252,41 @@ export default function App() {
   const exportCSV = (date) => {
     const rows = getReport(date);
     if(!rows.length){ showToast("Sin registros para esta fecha","warn"); return; }
-    const header = ["Nombre","DUI","Puesto","Turno","Salario","ISSS","AFP","Institucion AFP","Entrada","Salida","Estado","Geo Entrada","Geo Salida"];
-    const lines = rows.map(r=>{
+
+    // Build data array for SheetJS
+    const data = [
+      ["Nombre","DUI","Puesto","Turno","Salario","ISSS","AFP","Institucion AFP","Entrada","Salida","Estado","Geo Entrada","Geo Salida"]
+    ];
+    rows.forEach(r=>{
       const emp = employees.find(e=>e.id===r.employeeId)||{};
-      return [
-        r.employeeName,
-        emp.dui||"",
-        r.puesto,
-        r.turno,
-        r.salary||"",
-        emp.isss||"",
-        emp.afp||"",
-        emp.afpName||"",
-        r.checkIn||"",
-        r.checkOut||"",
+      data.push([
+        r.employeeName, emp.dui||"", r.puesto, r.turno, r.salary||"",
+        emp.isss||"", emp.afp||"", emp.afpName||"",
+        r.checkIn||"", r.checkOut||"",
         r.status==="P"?"Presente":r.status==="A"?"Ausente":r.status==="T"?"Tardanza":"",
-        r.checkInValid?"Si":"No",
-        r.checkOutValid?"Si":"No"
-      ].join(";");
+        r.checkInValid?"Si":"No", r.checkOutValid?"Si":"No"
+      ]);
     });
-    const BOM = "\uFEFF";
-    const csv = BOM + [header.join(";"),...lines].join("\n");
-    const blob = new Blob([csv],{type:"text/csv;charset=utf-8"});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a"); a.href=url; a.download=`asistencia_${date}.csv`; a.click();
-    showToast("CSV exportado");
+
+    // Use SheetJS to create real Excel file
+    import("https://cdn.sheetjs.com/xlsx-0.20.1/package/xlsx.mjs").then(XLSX=>{
+      const ws = XLSX.utils.aoa_to_sheet(data);
+      // Column widths
+      ws['!cols'] = [30,16,30,12,10,14,14,14,12,12,12,12,12].map(w=>({wch:w}));
+      // Style header row
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "Asistencia");
+      XLSX.writeFile(wb, `Asistencia_Capital_PM_${date}.xlsx`);
+      showToast("Excel exportado correctamente");
+    }).catch(()=>{
+      // Fallback to CSV if SheetJS fails
+      const BOM = "\uFEFF";
+      const csv = BOM + data.map(r=>r.join(";")).join("\n");
+      const blob = new Blob([csv],{type:"text/csv;charset=utf-8"});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.href=url; a.download=`asistencia_${date}.csv`; a.click();
+      showToast("CSV exportado");
+    });
   };
 
   // ══════════════════════════════════════════════════════════════════════
