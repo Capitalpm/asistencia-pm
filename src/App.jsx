@@ -525,11 +525,12 @@ export default function App() {
             </div>
             <GeoIndicator status={geoStatus} distance={geoDist} radius={config.fenceRadius}/>
             {!isDone && (
-              <div style={{display:"flex",gap:10}}>
+              <div style={{display:"flex",flexDirection:"column",gap:10}}>
                 {!geoStatus&&!isIn && <Btn full onClick={checkGeo} color={NAVY}>📡 Verificar ubicación</Btn>}
                 {!geoStatus&&isIn  && <Btn full onClick={checkGeo} color={NAVY}>📡 Verificar para salida</Btn>}
-                {geoStatus&&geoStatus!=="checking"&&!isIn && <Btn full onClick={()=>clockAction("in")} disabled={loading} color={GREEN}>✅ Registrar Entrada</Btn>}
-                {geoStatus&&geoStatus!=="checking"&&isIn  && <Btn full onClick={()=>clockAction("out")} disabled={loading} color={RED}>🏁 Registrar Salida</Btn>}
+                {geoStatus==="invalid" && <div style={{background:"#FEE2E2",borderRadius:10,padding:"10px 14px",color:"#DC2626",fontSize:13,fontWeight:600,textAlign:"center"}}>🚫 Debes estar dentro del área para registrar</div>}
+                {geoStatus==="valid"&&!isIn && <Btn full onClick={()=>clockAction("in")} disabled={loading} color={GREEN}>✅ Registrar Entrada</Btn>}
+                {geoStatus==="valid"&&isIn  && <Btn full onClick={()=>clockAction("out")} disabled={loading} color={RED}>🏁 Registrar Salida</Btn>}
               </div>
             )}
             {isDone && <div style={{background:"#DCFCE7",borderRadius:10,padding:"10px 14px",color:GREEN,fontWeight:700,fontSize:14,textAlign:"center"}}>✅ Jornada completada hoy</div>}
@@ -907,6 +908,25 @@ export default function App() {
               <PinPad pin={pin} setPin={setPin} label="Nuevo PIN (4 dígitos)" onConfirm={async p=>{
                 const co={...company,adminPin:p}; setCompany(co); await setStore("company",co); await fbSetCompany(co); setPin(""); showToast("✅ PIN actualizado");
               }}/>
+            </Card>
+            <Card style={{marginTop:16,border:"2px solid #FEE2E2"}}>
+              <div style={{fontWeight:700,color:RED,marginBottom:6}}>🗑️ Borrar Registros de Asistencia</div>
+              <div style={{fontSize:12,color:"#6B7280",marginBottom:14}}>Elimina todos los registros de entrada/salida. Los empleados no se borran. Útil para limpiar datos de prueba.</div>
+              <div style={{display:"flex",gap:10}}>
+                <Btn small full color={RED} onClick={async()=>{
+                  if(!window.confirm("¿Seguro que deseas borrar TODOS los registros de asistencia? Esta acción no se puede deshacer.")) return;
+                  setRecs({});
+                  localStorage.removeItem("cpm_v1_records");
+                  // Delete all records from Firestore
+                  try {
+                    const {getDocs, collection, deleteDoc, doc} = await import("firebase/firestore");
+                    const {db} = await import("./firebase.js");
+                    const snap = await getDocs(collection(db,"companies","capital-pm-001","records"));
+                    for(const d of snap.docs) await deleteDoc(doc(db,"companies","capital-pm-001","records",d.id));
+                  } catch(e){ console.error(e); }
+                  showToast("✅ Registros eliminados");
+                }}>🗑️ Borrar todos los registros</Btn>
+              </div>
             </Card>
           </div>
         )}
