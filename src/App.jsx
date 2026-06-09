@@ -1,6 +1,11 @@
 import { useState, useEffect, useCallback } from "react";
+import { fbGetCompany, fbSetCompany, fbGetConfig, fbSetConfig,
+         fbGetEmployees, fbSaveEmployee, fbDeleteEmployee,
+         fbGetRecords, fbSaveRecord, fbGetRecord,
+         fbListenRecords, fbListenEmployees } from "./firebase.js";
 
 const NAVY="#16243F",ORANGE="#E2571E",GREEN="#16A34A",RED="#DC2626",YELLOW="#D97706",LIGHT="#F0F4F8";
+// localStorage kept as offline fallback only
 const SK = k => `cpm_v1_${k}`;
 const getStore = async k => { try { const v=localStorage.getItem(SK(k)); return v?JSON.parse(v):null; } catch{return null;} };
 const setStore = async (k,v) => { try{localStorage.setItem(SK(k),JSON.stringify(v));return true;}catch{return false;} };
@@ -145,13 +150,15 @@ export default function App() {
   // ── Load data ──
   useEffect(()=>{
     (async()=>{
-      const co   = await getStore("company")       || DEFAULT_CO;
-      const cfg  = await getStore("config")        || DEFAULT_CFG;
-      const emps = await getStore("employees")     || [];
-      const recs = await getStore("records")       || {};
-      const pq   = await getStore("pending_queue") || [];
+      // Try Firebase first, fall back to localStorage
+      let co   = await fbGetCompany()   || await getStore("company")   || DEFAULT_CO;
+      let cfg  = await fbGetConfig()    || await getStore("config")    || DEFAULT_CFG;
+      let emps = await fbGetEmployees();
+      if(!emps.length) emps = await getStore("employees") || [];
+      let recs = await fbGetRecords();
+      if(!Object.keys(recs).length) recs = await getStore("records") || {};
+      const pq = await getStore("pending_queue") || [];
       setCompany(co); setConfig(cfg); setEmps(emps); setRecs(recs); setPending(pq);
-      // auto-sync pending if online
       if(navigator.onLine && pq.length>0) syncNow(pq, recs);
       setScreen("landing");
     })();
@@ -171,9 +178,26 @@ export default function App() {
     return ()=>{ window.removeEventListener("online",goOnline); window.removeEventListener("offline",goOffline); };
   },[syncNow]);
 
-  const saveEmps = async (e) => { setEmps(e); await setStore("employees",e); };
-  const saveRecs = async (r) => { setRecs(r); await setStore("records",r); };
-  const saveCfg  = async (c) => { setConfig(c); await setStore("config",c); };
+  const saveEmps = async (e) => {
+    setEmps(e);
+    await setStore("employees", e); // local backup
+    for(const emp of e) await fbSaveEmployee(emp);
+  };
+  const saveRecs = async (r) => {
+    setRecs(r);
+    await setStore("records", r); // local backup
+    // Save each date to Firebase
+    for(const [date, entries] of Object.entries(r)) {
+      await fbSaveRecord(date, entries);
+    }
+  };
+  const saveCfg = async (c) => {
+    setConfig(c);
+    await setStore("config", c);
+    await fbSetConfig(c);
+  };
+
+  // ── Sync pending queue → main records ──
 
   // ── Geo check ──
   const checkGeo = useCallback(()=>{
@@ -664,7 +688,13 @@ export default function App() {
                       setForm({name:e.name,dui:e.dui,pin:e.pin,puesto:e.puesto,turno:e.turno,phone:e.phone||"",salary:e.salary,isss:e.isss||"",afp:e.afp||"",afpName:e.afpName||"Crecer",photo:e.photo||""});
                       setScreen("admin_edit");
                     }} style={{background:"#EFF6FF",border:"none",borderRadius:8,padding:"6px 10px",color:"#1D4ED8",cursor:"pointer",fontSize:12,fontWeight:700}}>✏️ Editar</button>
-                    <button onClick={async()=>{ const ne=employees.filter(x=>x.id!==e.id); await saveEmps(ne); showToast("Empleado eliminado"); }} style={{background:"#FEE2E2",border:"none",borderRadius:8,padding:"6px 10px",color:RED,cursor:"pointer",fontSize:12,fontWeight:700}}>✕</button>
+                    <button onClick={async()=>{
+                      const ne=employees.filter(x=>x.id!==e.id);
+                      setEmps(ne);
+                      await setStore("employees", ne);
+                      await fbDeleteEmployee(e.id);
+                      showToast("Empleado eliminado");
+                    }} style={{background:"#FEE2E2",border:"none",borderRadius:8,padding:"6px 10px",color:RED,cursor:"pointer",fontSize:12,fontWeight:700}}>✕</button>
                   </div>
                 </div>
               </Card>
@@ -875,7 +905,7 @@ export default function App() {
             <Card style={{marginTop:16}}>
               <div style={{fontWeight:700,color:NAVY,marginBottom:12}}>🔐 PIN de Administrador</div>
               <PinPad pin={pin} setPin={setPin} label="Nuevo PIN (4 dígitos)" onConfirm={async p=>{
-                const co={...company,adminPin:p}; setCompany(co); await setStore("company",co); setPin(""); showToast("✅ PIN actualizado");
+                const co={...company,adminPin:p}; setCompany(co); await setStore("company",co); await fbSetCompany(co); setPin(""); showToast("✅ PIN actualizado");
               }}/>
             </Card>
           </div>
